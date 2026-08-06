@@ -23,36 +23,43 @@ const GerarSchema = z.object({
   valores: z.record(z.string(), z.string()),
 });
 
+// ---------- Status da configuração ----------
+// Consultada no carregamento da página. Devolve só o que a interface precisa
+// saber para decidir se dá para trabalhar — nunca a chave em si.
+
+export const obterStatusConfiguracao = createServerFn({ method: "GET" }).handler(async () => {
+  const { iaConfigurada, modeloEmUso } = await import("./config.server");
+  const { conversaoDisponivel } = await import("./conversao-doc.server");
+
+  return {
+    iaConfigurada: iaConfigurada(),
+    conversaoDocDisponivel: await conversaoDisponivel(),
+    modelo: modeloEmUso(),
+  };
+});
+
 // ---------- Análise do modelo: descobrir placeholders ----------
 
 export const analisarModelo = createServerFn({ method: "POST" })
-  .inputValidator((data: unknown) => AnalisarSchema.parse(data))
+  .validator((data: unknown) => AnalisarSchema.parse(data))
   .handler(async ({ data }) => {
     const { extrairPlaceholders } = await import("./contratos.server");
-    const placeholders = await extrairPlaceholders(data.templateBase64);
-    return { placeholders };
+    return await extrairPlaceholders(data.templateBase64);
   });
 
 // ---------- Extração com IA ----------
 
 export const extrairDados = createServerFn({ method: "POST" })
-  .inputValidator((data: unknown) => ExtrairSchema.parse(data))
+  .validator((data: unknown) => ExtrairSchema.parse(data))
   .handler(async ({ data }) => {
-    const key = process.env.LOVABLE_API_KEY;
-    if (!key) {
-      throw new Error(
-        "LOVABLE_API_KEY não configurada. A integração com a IA não está disponível.",
-      );
-    }
-
     const { extrairValoresViaIA } = await import("./contratos.server");
-    return await extrairValoresViaIA(key, data.placeholders, data.arquivos);
+    return await extrairValoresViaIA(data.placeholders, data.arquivos);
   });
 
 // ---------- Geração do .docx final ----------
 
 export const gerarContrato = createServerFn({ method: "POST" })
-  .inputValidator((data: unknown) => GerarSchema.parse(data))
+  .validator((data: unknown) => GerarSchema.parse(data))
   .handler(async ({ data }) => {
     const { gerarDocxPreenchido } = await import("./contratos.server");
     const docxBase64 = await gerarDocxPreenchido(data.templateBase64, data.valores);

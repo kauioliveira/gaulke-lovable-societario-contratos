@@ -29,9 +29,7 @@ export function formatarTelefone(valor: string): string {
 
 export function formatarMoeda(valor: number | string): string {
   const n =
-    typeof valor === "number"
-      ? valor
-      : Number(String(valor).replace(/\./g, "").replace(",", "."));
+    typeof valor === "number" ? valor : Number(String(valor).replace(/\./g, "").replace(",", "."));
   if (!Number.isFinite(n)) return String(valor);
   return n.toLocaleString("pt-BR", {
     style: "currency",
@@ -67,9 +65,7 @@ export function cnpjValido(valor: string): boolean {
   const d = apenasDigitos(valor);
   if (d.length !== 14 || /^(\d)\1{13}$/.test(d)) return false;
   const calc = (base: string, pesos: number[]) => {
-    const s = base
-      .split("")
-      .reduce((acc, n, i) => acc + Number(n) * pesos[i], 0);
+    const s = base.split("").reduce((acc, n, i) => acc + Number(n) * pesos[i], 0);
     const r = s % 11;
     return r < 2 ? 0 : 11 - r;
   };
@@ -78,28 +74,127 @@ export function cnpjValido(valor: string): boolean {
   return calc(d.slice(0, 12), p1) === Number(d[12]) && calc(d.slice(0, 13), p2) === Number(d[13]);
 }
 
-// Title Case preservando preposições em minúsculo (pt-BR)
+// Palavras de ligação que ficam em minúsculo no meio de um nome próprio —
+// "João da Silva", "Comércio de Peças", "Rua das Flores".
 const preposicoes = new Set([
-  "de", "da", "do", "das", "dos", "e", "em", "na", "no", "nas", "nos",
-  "a", "o", "as", "os", "com", "para", "por",
+  "de",
+  "da",
+  "do",
+  "das",
+  "dos",
+  "e",
+  "em",
+  "na",
+  "no",
+  "nas",
+  "nas",
+  "nos",
+  "a",
+  "o",
+  "as",
+  "os",
+  "com",
+  "para",
+  "por",
+  "sob",
+  "ao",
+  "aos",
+  "à",
+  "às",
+  "sem",
 ]);
 
-export function tituloEnderecoObjeto(texto: string): string {
+// Siglas das 27 unidades federativas — nunca sofrem Title Case.
+const UFS_VALIDAS = new Set([
+  "AC",
+  "AL",
+  "AP",
+  "AM",
+  "BA",
+  "CE",
+  "DF",
+  "ES",
+  "GO",
+  "MA",
+  "MT",
+  "MS",
+  "MG",
+  "PA",
+  "PB",
+  "PR",
+  "PE",
+  "PI",
+  "RJ",
+  "RN",
+  "RS",
+  "RO",
+  "RR",
+  "SC",
+  "SP",
+  "SE",
+  "TO",
+]);
+
+// Siglas que devem permanecer em caixa alta mesmo dentro de um nome próprio.
+const SIGLAS_CONHECIDAS = new Set([
+  "ltda",
+  "me",
+  "epp",
+  "eireli",
+  "s/a",
+  "sa",
+  "cpf",
+  "cnpj",
+  "rg",
+]);
+
+/**
+ * Title Case pt-BR: derruba tudo para minúsculo e sobe só a inicial de cada
+ * palavra, mantendo preposições e artigos em minúsculo. Usado em nome próprio,
+ * razão social, cidade, bairro, endereço e objeto social.
+ *
+ * A primeira palavra sempre sobe, mesmo sendo preposição. Tokens com dígito
+ * passam intactos (CEP, "nº 100", "Sala 2A").
+ */
+export function tituloPtBr(texto: string): string {
   if (!texto) return texto;
-  return texto
-    .toLowerCase()
-    .split(/(\s+|[,/–\-])/g)
-    .map((parte, idx) => {
-      if (/^\s+$/.test(parte) || /^[,/–\-]$/.test(parte)) return parte;
-      // numeros/CEP preservam
-      if (/\d/.test(parte)) return parte;
-      // primeira palavra sempre maiúscula
-      if (idx === 0) return parte.charAt(0).toUpperCase() + parte.slice(1);
-      if (preposicoes.has(parte)) return parte;
-      if (parte.length <= 1) return parte;
-      return parte.charAt(0).toUpperCase() + parte.slice(1);
-    })
-    .join("");
+  return (
+    texto
+      // "&" também separa: sem isso "P&G" vira um token só e sai "P&g".
+      .split(/(\s+|[,/–\-&])/g)
+      .map((parte, idx) => {
+        if (/^\s+$/.test(parte) || /^[,/–\-&]$/.test(parte)) return parte;
+        // numeros/CEP preservam
+        if (/\d/.test(parte)) return parte;
+        // Sigla de estado ("SC", "SP") continua em caixa alta — "Sc" no
+        // contrato, ainda mais na cláusula de foro, é erro visível.
+        if (UFS_VALIDAS.has(parte.toUpperCase())) return parte.toUpperCase();
+        const min = parte.toLowerCase();
+        if (SIGLAS_CONHECIDAS.has(min)) return min.toUpperCase();
+        // primeira palavra sempre maiúscula
+        if (idx === 0) return min.charAt(0).toUpperCase() + min.slice(1);
+        if (preposicoes.has(min)) return min;
+        // Letra sozinha sobe também: é inicial de nome ("João P. Silva") ou
+        // parte de razão social ("Comercial X Ltda"). Artigos de uma letra já
+        // foram tratados acima pela lista de preposições.
+        return min.charAt(0).toUpperCase() + min.slice(1);
+      })
+      .join("")
+  );
+}
+
+/** @deprecated Nome antigo de `tituloPtBr`, mantido para não quebrar chamadas. */
+export const tituloEnderecoObjeto = tituloPtBr;
+
+/**
+ * Siglas de órgão expedidor e afins: "detran/sc" → "DETRAN/SC". Title Case
+ * estragaria esses valores ("Detran/Sc").
+ */
+export function formatarSigla(valor: string): string {
+  return valor
+    .trim()
+    .toLocaleUpperCase("pt-BR")
+    .replace(/\s*\/\s*/g, "/");
 }
 
 // Detecta tipo de campo pelo nome do placeholder
@@ -109,24 +204,48 @@ export function detectarTipo(nome: string): string {
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .replace(/[_\s]+/g, " ");
+  // Endereço COMPOSTO vem antes de tudo: nomes como
+  // "ENDERECO_COMPLETO_COM_RUA_NUMERO_BAIRRO_CEP" citam vários componentes e
+  // seriam capturados pela regra de "cep" abaixo, quebrando a formatação e
+  // reprovando o campo na validação de CEP da tela de revisão.
+  if (/(endere|logradouro)/.test(n) && /(completo|\brua\b|numero|\bn\b|bairro|\bcep\b)/.test(n)) {
+    return ehEnderecoDeEmpresa(n) ? "enderecoEmpresa" : "enderecoSocio";
+  }
   if (/(cnpj)/.test(n)) return "cnpj";
   if (/\bcpf\b/.test(n)) return "cpf";
   if (/\bcep\b/.test(n)) return "cep";
   if (/(telefone|celular|fone)/.test(n)) return "telefone";
   if (/(capital social|valor.*quota|valor.*cota)/.test(n) && !/extenso/.test(n)) return "moeda";
   if (/(data.*nascimento|data.*fundac|^data$)/.test(n)) return "data";
+  // "DATA ATUAL", "DATA DE HOJE", "DATA DE EMISSÃO"… — preenchidos com a data de
+  // hoje; precisam do tipo "data" para manter dd/mm/aaaa ao reformatar.
+  if (/\bdata\b.*\b(atual|hoje|do dia|corrente|emiss|gera)/.test(n)) return "data";
   if (/^\s*(n\.?º?|numero|número)\s*$/.test(n)) return "numero";
   if (/^\s*bairro\s*$/.test(n)) return "bairro";
   if (/^\s*(cidade|municipio)\s*$/.test(n)) return "cidade";
   if (/^\s*(uf|estado)\s*$/.test(n)) return "uf";
   if (/\b(cidade|municipio|bairro)\b/.test(n)) return "tituloSimples";
   if (/(endere|logradouro)/.test(n)) {
-    if (/(empresa|sede|estabelecim|matriz|filial)/.test(n)) return "enderecoEmpresa";
-    return "enderecoSocio";
+    return ehEnderecoDeEmpresa(n) ? "enderecoEmpresa" : "enderecoSocio";
   }
   if (/(objeto social|atividade)/.test(n)) return "objeto";
   if (/(extenso)/.test(n)) return "texto";
+  // Órgão expedidor é sigla ("DETRAN/SC"); Title Case estragaria.
+  if (/(orgao|órgão) *(expedidor|emissor)|\bssp\b|\bdetran\b/.test(n)) return "sigla";
+  // Nome próprio / denominação — recebem Title Case na tela. Razão social e
+  // sócio ainda saem em CAIXA ALTA no documento (ver ehCampoEmpresaOuSocio).
+  if (
+    /\b(razao social|nome empresarial|denominacao social|nome fantasia)\b/.test(n) ||
+    /\bsocio\b|\bsocia\b|\badministrador\b|\badministradora\b/.test(n) ||
+    /\b(nacionalidade|profissao|porte)\b/.test(n)
+  ) {
+    return "nomeProprio";
+  }
   return "texto";
+}
+
+function ehEnderecoDeEmpresa(nomeNormalizado: string): boolean {
+  return /(empresa|sede|estabelecim|matriz|filial)/.test(nomeNormalizado);
 }
 
 // Remove rótulos redundantes que a IA às vezes inclui no valor
@@ -134,7 +253,11 @@ export function detectarTipo(nome: string): string {
 function removerRotuloRedundante(valor: string, rotulo: RegExp): string {
   let v = valor.trim();
   for (let i = 0; i < 4; i++) {
-    const novo = v.replace(rotulo, " ").replace(/\s+/g, " ").trim().replace(/^[,:\-–]\s*/, "");
+    const novo = v
+      .replace(rotulo, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/^[,:\-–]\s*/, "");
     if (novo === v) break;
     v = novo;
   }
@@ -150,15 +273,17 @@ function removerRotuloRedundante(valor: string, rotulo: RegExp): string {
 export function removerPalavrasDuplicadas(valor: string): string {
   if (!valor) return valor;
   const norm = (s: string) =>
-    s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    s
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase();
   let anterior = "";
   let atual = valor;
   // Loop até estabilizar (cobre 3+ repetições).
   while (anterior !== atual) {
     anterior = atual;
-    atual = atual.replace(
-      /(\b[\wÀ-ÿº°]+\b)(\s+)(\b[\wÀ-ÿº°]+\b)/g,
-      (m, a, sp, b) => (norm(a) === norm(b) ? `${a}${sp}` : m),
+    atual = atual.replace(/(\b[\wÀ-ÿº°]+\b)(\s+)(\b[\wÀ-ÿº°]+\b)/g, (m, a, sp, b) =>
+      norm(a) === norm(b) ? `${a}${sp}` : m,
     );
     atual = atual.replace(/\s{2,}/g, " ").trim();
   }
@@ -169,15 +294,20 @@ export function aplicarFormatacao(valor: string, tipo: string): string {
   if (!valor) return valor;
   const resultado = ((): string => {
     switch (tipo) {
-      case "cpf": return formatarCPF(valor);
-      case "cnpj": return formatarCNPJ(valor);
+      case "cpf":
+        return formatarCPF(valor);
+      case "cnpj":
+        return formatarCNPJ(valor);
       case "cep": {
         const limpo = removerRotuloRedundante(valor, /\bcep\b[:\s]*/gi);
         return formatarCEP(limpo);
       }
-      case "telefone": return formatarTelefone(valor);
-      case "moeda": return formatarMoeda(valor);
-      case "data": return formatarData(valor);
+      case "telefone":
+        return formatarTelefone(valor);
+      case "moeda":
+        return formatarMoeda(valor);
+      case "data":
+        return formatarData(valor);
       case "numero": {
         const limpo = removerRotuloRedundante(valor, /\b(n\.?º?|nº|numero|número)\b[:\s]*/gi);
         const d = limpo.match(/\d+[A-Za-z]?/);
@@ -203,14 +333,27 @@ export function aplicarFormatacao(valor: string, tipo: string): string {
         return formatarEnderecoSocio(valor);
       case "tituloSimples":
       case "objeto":
-        return tituloEnderecoObjeto(valor);
+      case "nomeProprio":
+        return tituloPtBr(valor);
+      case "sigla":
+        return formatarSigla(valor);
       default:
         return valor;
     }
   })();
   // Passe final: remover palavras consecutivas duplicadas em QUALQUER campo textual.
   // Não aplicar em campos puramente numéricos/formatados (cpf/cnpj/cep/telefone/moeda/data/numero/uf).
-  const puramenteFormatados = new Set(["cpf", "cnpj", "cep", "telefone", "moeda", "data", "numero", "uf"]);
+  const puramenteFormatados = new Set([
+    "cpf",
+    "cnpj",
+    "cep",
+    "telefone",
+    "moeda",
+    "data",
+    "numero",
+    "uf",
+    "sigla",
+  ]);
   if (puramenteFormatados.has(tipo)) return resultado;
   return removerPalavrasDuplicadas(resultado);
 }
@@ -237,9 +380,42 @@ export function formatarEnderecoSocio(raw: string): string {
 
 // ===== Números por extenso (pt-BR) =====
 const UNIDADES = ["", "um", "dois", "três", "quatro", "cinco", "seis", "sete", "oito", "nove"];
-const DEZ_A_DEZENOVE = ["dez", "onze", "doze", "treze", "quatorze", "quinze", "dezesseis", "dezessete", "dezoito", "dezenove"];
-const DEZENAS = ["", "", "vinte", "trinta", "quarenta", "cinquenta", "sessenta", "setenta", "oitenta", "noventa"];
-const CENTENAS = ["", "cento", "duzentos", "trezentos", "quatrocentos", "quinhentos", "seiscentos", "setecentos", "oitocentos", "novecentos"];
+const DEZ_A_DEZENOVE = [
+  "dez",
+  "onze",
+  "doze",
+  "treze",
+  "quatorze",
+  "quinze",
+  "dezesseis",
+  "dezessete",
+  "dezoito",
+  "dezenove",
+];
+const DEZENAS = [
+  "",
+  "",
+  "vinte",
+  "trinta",
+  "quarenta",
+  "cinquenta",
+  "sessenta",
+  "setenta",
+  "oitenta",
+  "noventa",
+];
+const CENTENAS = [
+  "",
+  "cento",
+  "duzentos",
+  "trezentos",
+  "quatrocentos",
+  "quinhentos",
+  "seiscentos",
+  "setecentos",
+  "oitocentos",
+  "novecentos",
+];
 
 function ateNovecentos(n: number): string {
   if (n === 0) return "";
@@ -269,8 +445,10 @@ export function inteiroPorExtenso(num: number): string {
   const milhares = Math.floor((n % 1_000_000) / 1000);
   const resto = n % 1000;
   const partes: string[] = [];
-  if (bilhoes > 0) partes.push(`${bilhoes === 1 ? "um bilhão" : `${ateNovecentos(bilhoes)} bilhões`}`);
-  if (milhoes > 0) partes.push(`${milhoes === 1 ? "um milhão" : `${ateNovecentos(milhoes)} milhões`}`);
+  if (bilhoes > 0)
+    partes.push(`${bilhoes === 1 ? "um bilhão" : `${ateNovecentos(bilhoes)} bilhões`}`);
+  if (milhoes > 0)
+    partes.push(`${milhoes === 1 ? "um milhão" : `${ateNovecentos(milhoes)} milhões`}`);
   if (milhares > 0) partes.push(milhares === 1 ? "mil" : `${ateNovecentos(milhares)} mil`);
   if (resto > 0) partes.push(ateNovecentos(resto));
   // Conector "e" antes da última parte se for < 100 ou múltiplo de 100
@@ -289,23 +467,26 @@ export function moedaPorExtenso(valor: number | string): string {
   const n =
     typeof valor === "number"
       ? valor
-      : Number(String(valor).replace(/[^\d,.-]/g, "").replace(/\./g, "").replace(",", "."));
+      : Number(
+          String(valor)
+            .replace(/[^\d,.-]/g, "")
+            .replace(/\./g, "")
+            .replace(",", "."),
+        );
   if (!Number.isFinite(n)) return "";
   const reais = Math.trunc(n);
   const centavos = Math.round((n - reais) * 100);
   const partes: string[] = [];
   if (reais > 0) partes.push(`${inteiroPorExtenso(reais)} ${reais === 1 ? "real" : "reais"}`);
-  if (centavos > 0) partes.push(`${inteiroPorExtenso(centavos)} ${centavos === 1 ? "centavo" : "centavos"}`);
+  if (centavos > 0)
+    partes.push(`${inteiroPorExtenso(centavos)} ${centavos === 1 ? "centavo" : "centavos"}`);
   if (partes.length === 0) return "zero real";
   const texto = partes.join(" e ");
   return texto.charAt(0).toUpperCase() + texto.slice(1);
 }
 
 export function quotasPorExtenso(valor: number | string): string {
-  const n =
-    typeof valor === "number"
-      ? valor
-      : Number(String(valor).replace(/\D/g, ""));
+  const n = typeof valor === "number" ? valor : Number(String(valor).replace(/\D/g, ""));
   if (!Number.isFinite(n) || n <= 0) return "";
   const texto = `${inteiroPorExtenso(n)} ${n === 1 ? "quota" : "quotas"}`;
   return texto.charAt(0).toUpperCase() + texto.slice(1);
@@ -313,17 +494,41 @@ export function quotasPorExtenso(valor: number | string): string {
 
 // ===== Endereço da empresa =====
 const ESTADOS_BR: Record<string, string> = {
-  "acre": "AC", "alagoas": "AL", "amapa": "AP", "amazonas": "AM",
-  "bahia": "BA", "ceara": "CE", "distrito federal": "DF", "espirito santo": "ES",
-  "goias": "GO", "maranhao": "MA", "mato grosso": "MT", "mato grosso do sul": "MS",
-  "minas gerais": "MG", "para": "PA", "paraiba": "PB", "parana": "PR",
-  "pernambuco": "PE", "piaui": "PI", "rio de janeiro": "RJ", "rio grande do norte": "RN",
-  "rio grande do sul": "RS", "rondonia": "RO", "roraima": "RR", "santa catarina": "SC",
-  "sao paulo": "SP", "sergipe": "SE", "tocantins": "TO",
+  acre: "AC",
+  alagoas: "AL",
+  amapa: "AP",
+  amazonas: "AM",
+  bahia: "BA",
+  ceara: "CE",
+  "distrito federal": "DF",
+  "espirito santo": "ES",
+  goias: "GO",
+  maranhao: "MA",
+  "mato grosso": "MT",
+  "mato grosso do sul": "MS",
+  "minas gerais": "MG",
+  para: "PA",
+  paraiba: "PB",
+  parana: "PR",
+  pernambuco: "PE",
+  piaui: "PI",
+  "rio de janeiro": "RJ",
+  "rio grande do norte": "RN",
+  "rio grande do sul": "RS",
+  rondonia: "RO",
+  roraima: "RR",
+  "santa catarina": "SC",
+  "sao paulo": "SP",
+  sergipe: "SE",
+  tocantins: "TO",
 };
 
 function normalizar(s: string): string {
-  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+  return s
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
 }
 
 function nomeEstadoParaUF(texto: string): string {
@@ -334,13 +539,18 @@ function nomeEstadoParaUF(texto: string): string {
   return ESTADOS_BR[n] ?? "";
 }
 
-export function formatarEnderecoEmpresa(raw: string): string {
-  if (!raw) return raw;
+/**
+ * Quebra uma linha de endereço nas suas peças. Usado como rede de segurança
+ * quando a IA devolve o endereço inteiro em vez dos componentes separados.
+ */
+export function decomporEndereco(raw: string): ComponentesEndereco {
+  if (!raw) return { ...ENDERECO_VAZIO };
   let s = removerPalavrasDuplicadas(raw.replace(/\s+/g, " ").trim());
 
-  // Extrair CEP (8 dígitos, formatado ou não)
+  // Extrair CEP (8 dígitos, formatado ou não) junto com o rótulo "CEP" que
+  // costuma vir antes dele — sem isso a palavra sobra e polui a cidade.
   let cep = "";
-  const cepMatch = s.match(/\b\d{2}\.?\d{3}-?\d{3}\b/);
+  const cepMatch = s.match(/(\bcep\b[:\s]*)?\b\d{2}\.?\d{3}-?\d{3}\b/i);
   if (cepMatch) {
     const d = cepMatch[0].replace(/\D/g, "");
     if (d.length === 8) {
@@ -352,7 +562,34 @@ export function formatarEnderecoEmpresa(raw: string): string {
   s = s.replace(/[-–,]\s*$/g, "").trim();
 
   // Quebrar por "-", "–" ou ","
-  let partes = s.split(/\s*[-–,]\s*/).map((p) => p.trim()).filter(Boolean);
+  let partes = s
+    .split(/\s*[-–,]\s*/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  // Número e complemento costumam vir como partes próprias — é o formato que o
+  // próprio prompt manda a IA usar ("Rua X, nº 100, sala 2, bairro Y").
+  // Sem retirá-los aqui, "nº 100" acabaria virando bairro.
+  // Rótulos escritos na própria linha ("bairro Centro", "Município X") não são
+  // dado — são etiqueta. Removê-los evita "bairro Bairro Centro" na remontagem.
+  partes = partes.map((p) =>
+    p.replace(/^(bairro|b\.|munic[ií]pio|cidade|logradouro|endere[çc]o)\b[:\s]*/i, "").trim(),
+  );
+
+  let numeroSolto = "";
+  let complemento = "";
+  partes = partes.filter((parte) => {
+    const soNumero = parte.match(/^(?:n\.?º?|nº|numero|número)?\s*(\d+[A-Za-z]?)$/i);
+    if (soNumero && !numeroSolto) {
+      numeroSolto = soNumero[1];
+      return false;
+    }
+    if (/^(sala|apto|apartamento|bloco|casa|loja|conjunto|andar|fundos|sobrado)\b/i.test(parte)) {
+      complemento = complemento ? `${complemento}, ${parte}` : parte;
+      return false;
+    }
+    return true;
+  });
 
   // Detectar UF na última parte
   let uf = "";
@@ -370,7 +607,10 @@ export function formatarEnderecoEmpresa(raw: string): string {
         const ufd = nomeEstadoParaUF(cand);
         if (ufd) {
           uf = ufd;
-          const resto = tokens.slice(0, tokens.length - n).join(" ").trim();
+          const resto = tokens
+            .slice(0, tokens.length - n)
+            .join(" ")
+            .trim();
           if (resto) partes[partes.length - 1] = resto;
           else partes.pop();
           break;
@@ -410,17 +650,90 @@ export function formatarEnderecoEmpresa(raw: string): string {
     }
   }
 
-  const tc = (t: string) => tituloEnderecoObjeto(t);
-  const segmentos: string[] = [];
-  if (logradouro) {
-    segmentos.push(numero ? `${tc(logradouro)}, nº ${numero}` : tc(logradouro));
+  return { logradouro, numero: numero || numeroSolto, complemento, bairro, cidade, uf, cep };
+}
+
+export function formatarEnderecoEmpresa(raw: string): string {
+  return montarEnderecoEmpresa(decomporEndereco(raw));
+}
+
+// ===== Endereço em componentes =====
+// A tela de revisão trabalha peça a peça (dá para validar cada uma); o contrato
+// recebe a linha montada. `decomporEndereco` é o caminho de volta, usado quando
+// a IA devolve só a linha inteira.
+
+export type ComponentesEndereco = {
+  logradouro: string;
+  numero: string;
+  complemento: string;
+  bairro: string;
+  cidade: string;
+  uf: string;
+  cep: string;
+};
+
+export const ENDERECO_VAZIO: ComponentesEndereco = {
+  logradouro: "",
+  numero: "",
+  complemento: "",
+  bairro: "",
+  cidade: "",
+  uf: "",
+  cep: "",
+};
+
+/** CEP no formato usado dentro de endereço: 00.000-000 */
+function cepComPonto(valor: string): string {
+  const d = valor.replace(/\D/g, "");
+  if (d.length !== 8) return valor.trim();
+  return `${d.slice(0, 2)}.${d.slice(2, 5)}-${d.slice(5)}`;
+}
+
+/**
+ * Endereço do SÓCIO: "rua X nº 100, sala 2, Bairro Y, CEP 00.000-000".
+ * Sem município nem UF — no contrato eles vêm de campos próprios.
+ * Tipo de logradouro em minúsculo, "Bairro" com maiúscula, "CEP" em caixa alta.
+ */
+export function montarEnderecoSocio(c: Partial<ComponentesEndereco>): string {
+  const partes: string[] = [];
+  if (c.logradouro) {
+    const via = minusculizarTipoLogradouro(tituloPtBr(c.logradouro));
+    partes.push(c.numero ? `${via} nº ${c.numero}` : via);
   }
-  if (bairro) segmentos.push(`bairro ${tc(bairro)}`);
-  if (cidade) segmentos.push(uf ? `${tc(cidade)} - ${uf}` : tc(cidade));
-  else if (uf) segmentos.push(uf);
-  let resultado = segmentos.join(", ");
-  if (cep) resultado += `${resultado ? ", " : ""}CEP ${cep}`;
+  if (c.complemento) partes.push(tituloPtBr(c.complemento));
+  if (c.bairro) partes.push(`Bairro ${tituloPtBr(c.bairro)}`);
+  if (c.cep) partes.push(`CEP ${cepComPonto(c.cep)}`);
+  return partes.join(", ");
+}
+
+/**
+ * Endereço da EMPRESA: "Rua X, nº 100, bairro Y, Município - UF, CEP 00.000-000".
+ * Aqui o logradouro fica capitalizado e "bairro" em minúsculo — é o padrão que o
+ * modelo de contrato usa na cláusula da sede.
+ */
+export function montarEnderecoEmpresa(c: Partial<ComponentesEndereco>): string {
+  const partes: string[] = [];
+  if (c.logradouro) {
+    const via = tituloPtBr(c.logradouro);
+    partes.push(c.numero ? `${via}, nº ${c.numero}` : via);
+  }
+  if (c.complemento) partes.push(tituloPtBr(c.complemento));
+  if (c.bairro) partes.push(`bairro ${tituloPtBr(c.bairro)}`);
+  if (c.cidade) partes.push(c.uf ? `${tituloPtBr(c.cidade)} - ${c.uf}` : tituloPtBr(c.cidade));
+  else if (c.uf) partes.push(c.uf);
+  let resultado = partes.join(", ");
+  if (c.cep) resultado += `${resultado ? ", " : ""}CEP ${cepComPonto(c.cep)}`;
   return resultado.trim();
 }
 
+function minusculizarTipoLogradouro(texto: string): string {
+  return texto.replace(
+    /^(Rua|Avenida|Travessa|Estrada|Rodovia|Alameda|Praça|Servidão|Linha)\b/,
+    (m) => m.toLowerCase(),
+  );
+}
 
+/** `true` se ao menos uma peça do endereço está preenchida. */
+export function temAlgumComponente(c: Partial<ComponentesEndereco>): boolean {
+  return Object.values(c).some((v) => (v ?? "").trim().length > 0);
+}

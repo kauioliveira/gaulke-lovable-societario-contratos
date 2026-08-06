@@ -185,3 +185,108 @@
     -webkit-font-smoothing: antialiased;
   }
 }
+
+/*
+ * Pré-visualização do contrato.
+ *
+ * O mammoth converte o .docx em HTML cru (<p>, <strong>, <table>…) e o Preflight
+ * do Tailwind zera margem de parágrafo, tamanho de título e estilo de lista —
+ * por isso a prévia saía como um bloco corrido, sem respiro entre cláusulas nem
+ * espaço para a assinatura. Estas regras devolvem só o espaçamento de um
+ * documento; nada de logo, cabeçalho ou enfeite.
+ */
+.contrato-preview {
+  line-height: 1.65;
+  text-align: justify;
+  hyphens: auto;
+}
+
+.contrato-preview p {
+  margin-block: 0.9em;
+  text-indent: 0;
+}
+
+/* Parágrafo vazio que o Word usa como espaçador: vira respiro de verdade. */
+.contrato-preview p:empty {
+  margin-block: 1.4em;
+  min-height: 1em;
+}
+
+.contrato-preview h1,
+.contrato-preview h2,
+.contrato-preview h3 {
+  margin-block: 1.6em 0.8em;
+  font-weight: 700;
+  line-height: 1.3;
+  text-align: center;
+  text-wrap: balance;
+}
+
+.contrato-preview h1 {
+  font-size: 1.15em;
+  text-transform: uppercase;
+}
+.contrato-preview h2 {
+  font-size: 1.05em;
+}
+.contrato-preview h3 {
+  font-size: 1em;
+}
+
+.contrato-preview strong,
+.contrato-preview b {
+  font-weight: 700;
+}
+
+.contrato-preview em,
+.contrato-preview i {
+  font-style: italic;
+}
+
+/*
+ * Linha de assinatura ("________"): o contrato termina com ela seguida do nome
+ * do sócio, e sem folga fica colada no texto anterior. `text-align: left`
+ * porque justificar uma linha de sublinhados a estica pela largura toda.
+ */
+.contrato-preview p:has(+ p) {
+  page-break-inside: avoid;
+}
+
+.contrato-preview .assinatura,
+.contrato-preview p.assinatura {
+  margin-block: 3.5em 0.2em;
+  text-align: left;
+  text-indent: 0;
+}
+
+.contrato-preview ul,
+.contrato-preview ol {
+  margin-block: 0.9em;
+  padding-inline-start: 2em;
+  text-align: left;
+}
+.contrato-preview ul {
+  list-style: disc;
+}
+.contrato-preview ol {
+  list-style: decimal;
+}
+.contrato-preview li {
+  margin-block: 0.35em;
+}
+
+.contrato-preview table {
+  width: 100%;
+  margin-block: 1.2em;
+  border-collapse: collapse;
+}
+.contrato-preview th,
+.contrato-preview td {
+  padding: 0.4em 0.6em;
+  border: 1px solid #d4d4d4;
+  text-align: left;
+  vertical-align: top;
+}
+.contrato-preview th {
+  font-weight: 700;
+}

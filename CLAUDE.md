@@ -4,8 +4,9 @@ Guia para o Claude Code (e outros agentes) trabalharem neste repositório.
 
 ## O que é este projeto
 
-Gerador de contratos societários da **Gaulke Contábil**: recebe um modelo `.docx`
-e documentos da empresa/sócios, extrai os dados com IA multimodal, submete a
+Gerador de contratos societários da **Gaulke Contábil**: recebe um modelo Word
+(`.docx` ou `.doc`) e documentos da empresa/sócios, extrai os dados com a OpenAI
+(visão multimodal, sem OCR separado), submete a
 revisão humana e devolve o contrato preenchido preservando a formatação do
 modelo. Duas páginas, sem banco de dados.
 
@@ -17,14 +18,18 @@ Documentação de apoio: [README.md](README.md) ·
 
 ```bash
 bun install
-bun run dev      # dev server
-bun run build    # build de produção
+bun run dev      # dev server (porta 8080)
+NITRO_PRESET=node-server bun run build   # build de produção
 bun run lint     # ESLint (Prettier incluso como regra)
 bun run format   # Prettier
 ```
 
-Não há suíte de testes. Verificação típica: `bun run lint` + exercitar o fluxo
-completo no navegador com um modelo e documentos reais.
+Precisa de um `.env` com `OPENAI_API_KEY` — sem ela o app exibe a tela de
+configuração ausente e não abre. Veja `.env.example`.
+
+Não há suíte de testes. Verificação típica: `npx tsc --noEmit` + exercitar o fluxo
+completo no navegador com um modelo e documentos reais (há amostras em
+`exemplo-claude/`, fora do versionamento).
 
 ## Convenções do código
 
@@ -55,15 +60,23 @@ nunca edite à mão. Preserve o `<Outlet />` em `__root.tsx`.
   dentro dos handlers de `createServerFn` — é isso que mantém `docxtemplater`,
   `pizzip` e a chave de API fora do bundle do cliente. Não converta esses
   `await import()` em imports estáticos.
-- Toda server function valida a entrada com Zod no `inputValidator`.
-- `LOVABLE_API_KEY` só é lida via `process.env` no servidor.
+- Toda server function valida a entrada com Zod no `validator`.
+- Variáveis de ambiente têm **um ponto único de leitura**:
+  [config.server.ts](src/lib/config.server.ts). Não espalhe `process.env` pelo
+  código; a chave da OpenAI nunca pode chegar ao cliente.
 
 ### Vite
 
-[vite.config.ts](vite.config.ts) usa `@lovable.dev/vite-tanstack-config`, que já
-inclui `tanstackStart`, `viteReact`, `tailwindcss`, `tsConfigPaths`, `nitro`,
-componentTagger, injeção de `VITE_*`, alias `@` e dedupe. **Adicionar esses
-plugins manualmente quebra o app** com plugins duplicados.
+[vite.config.ts](vite.config.ts) monta os plugins diretamente. Três detalhes que
+quebram de forma não óbvia se mexidos:
+
+- **`tanstackStart` precisa vir antes de `viteReact`.**
+- **`css.transformer: "lightningcss"`** não é decoração: o padrão do Vite 8 é
+  `postcss`, e trocar muda como `color-mix`, nesting e prefixos são gerados —
+  regressão visual sem erro de build.
+- **`resolve.dedupe`** evita duas cópias de React ("Invalid hook call") e de
+  `@tanstack/query-core` (o `QueryClient` do router deixa de ser o que os hooks
+  leem — falha silenciosa).
 
 ### Dependências
 
@@ -89,6 +102,29 @@ Bairro Rio Vermelho Estação`) são **específicas do modelo atual**. Ao mexer
 - `docx` gerado deve abrir no Word sem aviso de reparo — em caso de dúvida,
   peça ao usuário para validar o arquivo.
 
+### Validação do modelo
+
+O modelo é validado **no upload**, não ao clicar em "Analisar documentos"
+([diagnostico-modelo.ts](src/lib/diagnostico-modelo.ts)). Erro ⇒ o arquivo é
+descartado e o botão fica desabilitado; aviso ⇒ apenas informa. Ao acrescentar
+uma checagem, decida a severidade pelo critério: **bloqueia se o contrato final
+puder sair errado sem ninguém perceber**; caso contrário é aviso.
+
+`diagnosticarModelo()` precisa continuar **puro** (sem pizzip) — ele roda no
+cliente. Tudo que exigir ler o `.docx` vai em `extrairPlaceholders`, que devolve
+a estrutura já pronta para o diagnóstico.
+
+### Conversão de `.doc`
+
+[conversao-doc.server.ts](src/lib/conversao-doc.server.ts) roda `soffice`
+headless. Os imports de `node:*` são **dinâmicos de propósito** — é o que mantém
+o código funcionando em runtimes sem processo/filesystem (lá a checagem falha e o
+fallback assume). Não os torne estáticos. A função devolve `null` em vez de
+lançar quando o ambiente não suporta, para o chamador escolher a mensagem.
+
+Produção usa o [Dockerfile](Dockerfile) da raiz: `libreoffice-writer` na imagem e
+`NITRO_PRESET=node-server` na build.
+
 ### Regras de negócio
 
 As regras jurídicas estão duplicadas por natureza entre o **prompt de sistema**
@@ -108,13 +144,19 @@ de precedência) **e** no `switch` de `aplicarFormatacao()`.
 
 ### Privacidade
 
-Documentos são processados em memória e descartados. Não introduza persistência,
-logging de conteúdo de documentos ou envio a serviços de terceiros além do
-gateway de IA já utilizado.
+Documentos são processados em memória e descartados por esta aplicação — mas são
+enviados à OpenAI para leitura, então contêm dado pessoal saindo da
+infraestrutura do cliente. Não introduza persistência, logging de conteúdo de
+documentos, nem envio a qualquer serviço além da OpenAI já utilizada.
 
-## Git / Lovable
+### IA
 
-O repositório é conectado ao Lovable. **Não reescreva histórico publicado** — nada
-de force push, rebase, amend ou squash em commits já enviados; isso corrompe o
-histórico do projeto no Lovable. Commits no branch conectado sincronizam com o
-editor, então mantenha o branch sempre em estado funcional.
+O provedor é a **OpenAI**, via `fetch` puro em
+[openai.server.ts](src/lib/openai.server.ts) — sem SDK. A extração usa
+**Structured Outputs** com `strict: true`, e o modo estrito não aceita objeto com
+chaves arbitrárias: por isso a resposta traz `campos` como **lista**, convertida
+para dicionário logo em seguida. Ao mexer no formato da resposta, mexa nos dois
+lugares (esquema e conversão) — eles têm que continuar casando.
+
+O projeto **não é mais conectado ao Lovable**. Não reintroduza
+`@lovable.dev/*`, `LOVABLE_API_KEY` nem `window.__lovableEvents`.

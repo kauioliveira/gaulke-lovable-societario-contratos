@@ -14,14 +14,21 @@ define uma rota. Convenções completas em [src/routes/README.md](src/routes/REA
 | [src/routes/index.tsx](src/routes/index.tsx)     | `/`        | `PaginaInicial`               | Upload do modelo e dos documentos; dispara análise + extração      |
 | [src/routes/revisao.tsx](src/routes/revisao.tsx) | `/revisao` | `PaginaRevisao`               | Revisão dos dados extraídos, validações, prévia e download         |
 
-Nenhuma rota tem `loader` ou parâmetros dinâmicos. Ambas definem `head()` com
-título e metatags próprias.
+Nenhuma rota tem parâmetros dinâmicos. A rota **raiz** tem um `loader` que
+consulta `obterStatusConfiguracao` (ver abaixo); as duas rotas de página não têm
+loader e definem `head()` com título e metatags próprias.
 
 ### `/`
 
-- Estado local: `modelo: ArquivoUpload[]` (máx. 1, `.docx`) e
-  `docs: ArquivoUpload[]` (máx. 10, `.pdf/.jpg/.jpeg/.png/.webp`).
-- Botão habilita apenas com exatamente 1 modelo e ≥ 1 documento.
+- Estado local: `modelo: ArquivoUpload[]` (máx. 1, `.docx`/`.doc`),
+  `docs: ArquivoUpload[]` (máx. 10, `.pdf/.jpg/.jpeg/.png/.webp`),
+  `diagnostico` e `placeholdersValidados`.
+- **Ao trocar o modelo** (`aoTrocarModelo`), dispara a mutation `validacao`:
+  checa o formato localmente, chama `analisarModelo` e roda
+  `diagnosticarModelo()`. Havendo erros, `setModelo([])` descarta o arquivo,
+  `placeholdersValidados` volta a `null` e um toast de erro é exibido.
+- Botão habilita apenas com `placeholdersValidados !== null` e ≥ 1 documento —
+  ou seja, um modelo que passou na validação.
 - Ao concluir, grava em `sessionStorage["gaulke:contrato:estado"]`:
 
 ```ts
@@ -50,10 +57,30 @@ título e metatags próprias.
 ## Server functions
 
 Definidas em [src/lib/contratos.functions.ts](src/lib/contratos.functions.ts) com
-`createServerFn({ method: "POST" })` e validação Zod no `inputValidator`. São
-chamadas diretamente do cliente como funções — não há rotas REST expostas.
+`createServerFn` e validação Zod no `validator`. São chamadas diretamente do
+cliente como funções — não há rotas REST expostas.
 
 Erros são lançados como `Error`; o cliente os exibe via `toast.error(e.message)`.
+
+### `obterStatusConfiguracao`
+
+Chamada pelo `loader` da rota raiz, no carregamento da página.
+
+```ts
+// sem entrada
+// saída
+{
+  iaConfigurada: boolean;
+  conversaoDocDisponivel: boolean;
+  modelo: string;
+}
+```
+
+Devolve apenas o que a interface precisa para decidir se dá para trabalhar —
+**nunca a chave**. Com `iaConfigurada: false` o `RootComponent` renderiza a tela
+de configuração ausente no lugar do `<Outlet />`, e o aplicativo não abre. Com
+`conversaoDocDisponivel: false` aparece só um aviso discreto: `.docx` continua
+funcionando, apenas `.doc` fica indisponível.
 
 ### `analisarModelo`
 
@@ -62,9 +89,25 @@ Detecta os campos variáveis do modelo Word.
 ```ts
 // entrada
 { templateBase64: string }
-// saída
-{ placeholders: string[] }
+// saída (EstruturaModelo)
+{
+  placeholders: string[];
+  malformados: string[];      // trechos com chaves quebradas: "{{CAMPO}", "{CAMPO}", "{{}}"
+  templateBase64: string;     // o .docx convertido; "" quando não houve conversão
+  convertidoDeDoc: boolean;
+}
 ```
+
+Aceita `.docx` e `.doc`. O `.doc` é convertido no servidor via LibreOffice e o
+resultado volta em `templateBase64` — o cliente passa a usar **esse** arquivo,
+para que a geração final opere sobre exatamente o que foi analisado. Sem
+conversão o campo volta vazio e o cliente reusa o arquivo que já tem.
+
+Chamada **no momento do upload do modelo** (não ao clicar em "Analisar
+documentos"), para que o usuário descubra problemas de estrutura antes de
+esperar a extração com IA. O resultado passa por `diagnosticarModelo()` e os
+placeholders validados ficam guardados no estado da página — `extrairDados` os
+reaproveita, sem uma segunda análise.
 
 Chaves retornadas em dois formatos:
 
@@ -72,8 +115,14 @@ Chaves retornadas em dois formatos:
 - `__VERMELHO__::<texto>` — veio de um run em vermelho, onde `<texto>` é o
   próprio conteúdo do trecho.
 
-Retornar lista vazia faz a página inicial abortar com mensagem orientando sobre
-as marcações aceitas.
+Lista vazia vira o erro `sem-campos` no diagnóstico, que recusa o modelo.
+
+Erros lançados:
+
+- **`.doc` num ambiente sem LibreOffice** — mensagem com o passo a passo da
+  conversão manual no Word;
+- **qualquer outro formato** (ou ZIP sem `word/document.xml`) — mensagem de
+  formato inválido.
 
 ### `extrairDados`
 
@@ -94,10 +143,14 @@ Extrai os valores dos documentos com IA multimodal.
 }
 ```
 
-- Requer `process.env.LOVABLE_API_KEY`; sem ela, lança erro explicando que a
-  integração não está disponível.
-- Erros propagados do gateway: `429` → "Limite de uso da IA atingido…",
-  `402` → "Créditos da IA esgotados…".
+- Requer `OPENAI_API_KEY`. Na prática nunca falha por falta de chave: o app já
+  bloqueia na abertura (ver `obterStatusConfiguracao`).
+- A resposta usa **Structured Outputs** (`response_format: json_schema`, `strict`),
+  então o JSON vem garantido pelo esquema. Se a API recusar essa combinação, a
+  chamada é repetida sem o esquema e o `JSON.parse` volta a ser o caminho.
+- Erros traduzidos: `401/403` chave inválida, `404` modelo inexistente na conta,
+  `429` limite ou créditos esgotados, `413` payload grande demais, `5xx`
+  indisponibilidade. Timeout configurável e uma retentativa em 429/5xx.
 - Além dos placeholders solicitados, pode retornar o meta-campo
   `__META_TIPO_DOC_IDENTIDADE__` com `"RG"`, `"CNH"` ou `""`.
 - Campos cujo nome indique "data atual/hoje/do dia/corrente/emissão/geração" são
@@ -126,10 +179,10 @@ arquivo final para conferência.
 
 ## Provedor externo
 
-| Endpoint                                             | Método | Uso                                                                                                                                             |
-| ---------------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `https://ai.gateway.lovable.dev/v1/chat/completions` | `POST` | Extração multimodal, modelo `google/gemini-3-flash-preview`, `temperature: 0.1`. Headers: `Lovable-API-Key`, `X-Lovable-AIG-SDK: vercel-ai-sdk` |
+| Endpoint                              | Método | Uso                                                                                                                                                                          |
+| ------------------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `${OPENAI_BASE_URL}/chat/completions` | `POST` | Extração multimodal. Modelo de `OPENAI_MODEL` (padrão `gpt-5.4`), `temperature: 0.1`, `response_format` com esquema estrito. Header `Authorization: Bearer <OPENAI_API_KEY>` |
 
-Chamado por `fetch` direto em
-[src/lib/contratos.server.ts](src/lib/contratos.server.ts) — o adapter
-`@ai-sdk/openai-compatible` não suporta file parts de PDF.
+Chamado por [src/lib/openai.server.ts](src/lib/openai.server.ts) com `fetch` puro.
+Não usamos o SDK oficial nem o AI SDK: é uma única chamada, e adaptadores
+`openai-compatible` não suportam file parts de PDF.

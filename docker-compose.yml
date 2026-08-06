@@ -1,0 +1,16 @@
+services:
+  app:
+    image: ${IMAGE_NAME}:${IMAGE_TAG}
+    container_name: ${CONTAINER_NAME}
+    restart: unless-stopped
+
+    env_file:
+      - .env.prod
+
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+
+    ports:
+      - "${EXTERNAL_PORT}:${INTERNAL_PORT}"

@@ -31,18 +31,32 @@ Regra crítica — origem única:
   sem resumir, reordenar, remover atividades ou acrescentar palavras.
 - Ignorar códigos CNAE, cabeçalhos e o próprio rótulo.
 - Devolver em minúsculas; o sistema aplica Title Case com preposições corretas
-  (`tituloEnderecoObjeto`).
+  (`tituloPtBr`).
 - **Sem REGIN anexado, o campo fica vazio** e o motivo entra em `faltantes` e
   `observacoes`. Nunca derivar objeto social de outros documentos.
 
 ## Endereços
 
-Dois formatos distintos, escolhidos por `detectarTipo()`:
+O endereço **não é extraído como uma linha pronta**. A IA devolve cada peça
+separada, sob nomes sintéticos que não existem no Word
+(`__ENDSOCIO_LOGRADOURO__`, `__ENDEMPRESA_CEP__`…), a tela de revisão mostra um
+campo por peça, e só na geração a linha é montada e gravada no marcador composto
+do modelo.
 
-| Tipo                                   | Formato alvo                                                    | Função                      |
-| -------------------------------------- | --------------------------------------------------------------- | --------------------------- |
-| `enderecoSocio` (pessoa física)        | `rua Nome da Rua nº 100, sala 2, Bairro Nome, CEP 00.000-000`   | `formatarEnderecoSocio()`   |
-| `enderecoEmpresa` (sede/matriz/filial) | `Rua Nome, nº 100, bairro Nome, Município - UF, CEP 00.000-000` | `formatarEnderecoEmpresa()` |
+Isso existe para permitir **conferir e validar peça por peça** — CEP no padrão,
+UF entre as 27 siglas, número presente — em vez de aprovar um texto corrido. Se a
+IA devolver só a linha inteira, `decomporEndereco()` a quebra nas peças como rede
+de segurança.
+
+O logradouro vem com o **tipo por extenso**: documentos abreviam
+("R LEONARDO KRAINSKI") e o prompt manda expandir para "Rua Leonardo Krainski".
+
+Dois formatos distintos na montagem, escolhidos por `detectarTipo()`:
+
+| Tipo                                   | Formato alvo                                                    | Função                    |
+| -------------------------------------- | --------------------------------------------------------------- | ------------------------- |
+| `enderecoSocio` (pessoa física)        | `rua Nome da Rua nº 100, sala 2, Bairro Nome, CEP 00.000-000`   | `montarEnderecoSocio()`   |
+| `enderecoEmpresa` (sede/matriz/filial) | `Rua Nome, nº 100, bairro Nome, Município - UF, CEP 00.000-000` | `montarEnderecoEmpresa()` |
 
 Convenções comuns:
 
@@ -55,14 +69,11 @@ Convenções comuns:
 - No endereço do **sócio** não entram município nem UF — eles têm campos
   próprios.
 
-`formatarEnderecoEmpresa()` faz o parsing por partes: extrai o CEP, detecta a UF
-na última parte (aceitando sigla ou nome completo do estado, inclusive compostos
-como "rio grande do sul"), separa logradouro + número da primeira parte e trata o
-restante como bairro + cidade.
-
-> **Exceção na geração:** o valor do campo de endereço da empresa é enviado
-> **literalmente** como está na tela de revisão, sem reformatar — regra
-> confirmada pelo usuário. Veja `revisao.tsx`, na montagem de `valoresFinais`.
+`decomporEndereco()` faz o parsing por partes: extrai o CEP (com o rótulo "CEP"
+junto, se houver), detecta a UF na última parte (aceitando sigla ou nome completo
+do estado, inclusive compostos como "rio grande do sul"), separa número e
+complemento quando vêm como partes próprias, e remove rótulos escritos na linha
+("bairro Centro" → "Centro").
 
 ## Placeholders-rótulo
 
@@ -126,10 +137,20 @@ Na geração, o preâmbulo do contrato é normalizado para:
 
 ## Estado civil e regime de bens
 
+O regime escolhido **precisa chegar ao contrato**. Como a maioria dos modelos não
+tem marcador próprio para ele, o padrão é escrevê-lo junto ao estado civil:
+`Casado(a)` vira **"casado sob o regime de comunhão parcial de bens"**, que é como
+o contrato social redige. Havendo um marcador `{{REGIME_BENS}}` (ou
+`REGIME_MATRIMONIAL`, `REGIME_CASAMENTO`), ele é usado no lugar.
+
 - Campo de estado civil vira um `Select` com: Solteiro(a), Casado(a),
   Divorciado(a), Viúvo(a), Separado(a) judicialmente, União estável.
 - Se o valor contiver "casad", a seleção de **regime de bens** passa a ser
-  obrigatória e bloqueia a geração enquanto estiver vazia.
+  obrigatória e bloqueia a geração enquanto estiver vazia. O seletor aparece no
+  **fim** da lista de campos, não no topo: ele só faz sentido depois que o
+  estado civil foi conferido, e o estado civil está entre os campos.
+- Trocar o estado civil para algo que não seja casado limpa o regime escolhido,
+  para ele não vazar para o contrato.
 - Opções: Comunhão parcial de bens, Comunhão universal de bens, Separação total
   de bens, Participação final nos aquestos.
 - O regime escolhido é gravado no placeholder cujo nome case com
@@ -154,6 +175,48 @@ Na geração:
 O conversor por extenso (`inteiroPorExtenso`) cobre até bilhões, com `cem` vs.
 `cento` e concordância de singular/plural (`real`/`reais`, `quota`/`quotas`).
 
+## Caixa dos textos
+
+`tituloPtBr()` normaliza texto para Title Case pt-BR: derruba tudo para minúsculo
+e sobe só a inicial de cada palavra, mantendo em minúsculo as palavras de ligação
+(`de`, `da`, `do`, `das`, `dos`, `e`, `em`, `na`, `no`, `sob`, `ao`, `à`…).
+
+Aplicado nos tipos `nomeProprio` (razão social, sócio, administrador,
+nacionalidade, profissão, porte), `cidade`, `bairro`, `tituloSimples` e `objeto`.
+
+Três exceções deliberadas:
+
+- **Siglas de UF** (`SC`, `SP`) ficam em caixa alta. Sem isso a cláusula de foro
+  sairia "São Bento do Sul - Sc".
+- **Siglas de tipo societário** (`LTDA`, `ME`, `EPP`, `EIRELI`) ficam em caixa alta.
+- **Órgão expedidor** tem tipo próprio (`sigla`) e vai inteiro para caixa alta —
+  Title Case transformaria `DETRAN/SC` em `Detran/Sc`.
+
+O `&` separa palavras, senão `P&G` sairia `P&g`.
+
+Isso é **normalização de tela**. Razão social e nome do sócio continuam saindo em
+CAIXA ALTA e negrito no documento, aplicados por `ehCampoEmpresaOuSocio()` na
+geração — praxe em contrato social.
+
+## Nome canônico único por campo
+
+Cada campo do modelo precisa ter **uma só grafia** em todo o documento.
+Marcadores que significam a mesma coisa escritos de formas diferentes —
+`{{SOCIO}}` e `{{SÓCIO}}`, `{{CIDADE_E_ESTADO}}` e `{{CIDADE E ESTADO}}` — são
+detectados por `agruparGrafiasEquivalentes()` (mesma normalização de
+`detectarTipo()`: sem acento, minúsculo, `_`/espaços colapsados) e **bloqueiam o
+upload**.
+
+O motivo é olhar para frente: qualquer processo que busque um campo pelo nome
+(auditoria do contrato gerado, varredura em lote de modelos, mapeamento fixo de
+campo → regra de formatação) encontra grafias concorrentes e falha ou escolhe a
+errada. Padronizar no Word uma vez elimina a classe inteira de problema.
+
+Como rede de segurança, a tela de revisão continua agrupando grafias
+equivalentes num campo só e replicando o valor em todas elas na geração — de
+modo que, se alguma escapar, o contrato nunca saia com textos divergentes para o
+mesmo dado.
+
 ## Validações da tela de revisão
 
 | Verificação                                         | Severidade | Efeito             |
@@ -162,24 +225,55 @@ O conversor por extenso (`inteiroPorExtenso`) cobre até bilhões, com `cem` vs.
 | CPF inválido (`cpfValido`, dígitos verificadores)   | erro       | Bloqueia           |
 | CNPJ inválido (`cnpjValido`, dígitos verificadores) | erro       | Bloqueia           |
 | Regime de bens ausente com sócio casado             | erro       | Bloqueia           |
+| Peça de endereço vazia (menos complemento)          | erro       | Bloqueia           |
 | CEP fora de `00000-000`                             | aviso      | Não bloqueia       |
+| UF fora do padrão de 2 letras                       | aviso      | Não bloqueia       |
+| Nº de quotas ≠ capital social                       | aviso      | Não bloqueia       |
 
-Ambos os validadores rejeitam sequências de dígitos repetidos
+Ambos os validadores de documento rejeitam sequências de dígitos repetidos
 (`111.111.111-11`).
 
-O painel lateral ainda exibe, sem bloquear: `faltantes` e `conflitos`
-reportados pela IA e o texto livre de `observacoes`.
+**Quotas × capital** merece explicação: a cláusula do capital costuma dizer
+"dividido em N quotas no valor de R$ 1,00". Quando é esse o caso, o número de
+quotas tem que ser igual ao capital, senão o contrato sai com uma conta errada
+sem ninguém perceber. É aviso e não bloqueio porque outro modelo pode adotar
+valor unitário diferente.
+
+Cada validação carrega um texto de **ajuda** (o "?" ao lado), dizendo onde o dado
+costuma estar no documento e qual o formato esperado.
+
+O painel lateral ainda exibe, sem bloquear:
+
+- **`faltantes`** — o que a IA não encontrou. A lista é **reativa**: cada item
+  some conforme o campo é preenchido à mão.
+- **`conflitos`** — valores divergentes entre documentos, cada um com sua fonte.
+- **`observacoes`** — texto livre da IA.
+- Campos de **baixa confiança** ganham um selo "conferir" no formulário: a IA já
+  reporta o quanto confia em cada leitura, e ignorar isso desperdiçava um sinal
+  útil de para onde olhar. O selo some assim que o usuário sai do campo (já
+  conferiu) e só reaparece se o campo for esvaziado.
 
 ## Detecção de tipo de campo
 
 `detectarTipo(nome)` normaliza o nome do placeholder (sem acentos, minúsculo,
 `_` e espaços colapsados) e resolve, nesta ordem de precedência:
 
-`cnpj` → `cpf` → `cep` → `telefone` → `moeda` (capital social / valor da quota,
-exceto "extenso") → `data` (nascimento, fundação, `data` isolado) →
-`numero` / `bairro` / `cidade` / `uf` (rótulos isolados) → `tituloSimples`
-(cidade/município/bairro dentro de nome composto) → `enderecoEmpresa` ou
-`enderecoSocio` → `objeto` (objeto social / atividade) → `texto`.
+**endereço composto** → `cnpj` → `cpf` → `cep` → `telefone` → `moeda` (capital
+social / valor da quota, exceto "extenso") → `data` (nascimento, fundação, `data`
+isolado, "data atual/hoje/corrente/emissão/geração") → `numero` / `bairro` /
+`cidade` / `uf` (rótulos isolados) → `tituloSimples` (cidade/município/bairro
+dentro de nome composto) → `enderecoEmpresa` ou `enderecoSocio` → `objeto`
+(objeto social / atividade) → `texto`.
+
+**Endereço composto vem primeiro** de propósito. Nomes de placeholder que
+descrevem o endereço inteiro — como
+`{{ENDEREÇO_COMPLETO_COM_RUA_NUMERO_BAIRRO_CEP}} `— citam vários componentes e
+seriam capturados pela regra de `cep`, o que aplicaria `formatarCEP()` num
+endereço inteiro e ainda reprovaria o campo na validação de CEP da tela de
+revisão, bloqueando a geração. A regra dispara quando o nome contém
+`endere`/`logradouro` **e** ao menos um de `completo`, `rua`, `numero`, `n`,
+`bairro`, `cep`; a distinção sócio vs. empresa continua sendo feita por
+`ehEnderecoDeEmpresa()` (`empresa|sede|estabelecim|matriz|filial`).
 
 A ordem importa: regras mais específicas vêm antes das genéricas. Ao adicionar um
 tipo novo, insira-o na posição correta e trate-o também no `switch` de

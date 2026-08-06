@@ -1,11 +1,21 @@
 // Lógica do gerador de contratos — só executa no servidor.
-// docxtemplater + pizzip = pura JS, compatível com Worker SSR.
+// docxtemplater + pizzip são JS puro, sem dependência de binário.
 
 import PizZip from "pizzip";
 import Docxtemplater from "docxtemplater";
-// AI SDK não é usado para extração (não suporta file parts PDF no adapter
-// openai-compatible); chamamos o gateway via fetch direto.
-
+import {
+  detectarFormatoDocumento,
+  MENSAGEM_CONVERSAO_DOC,
+  MENSAGEM_FORMATO_INVALIDO,
+} from "./formato-documento";
+import type { EstruturaModelo } from "./diagnostico-modelo";
+import { detectarTipo } from "./formatters";
+import {
+  ehChaveDeEndereco,
+  instrucoesPrompt,
+  chavesDoEscopo,
+  type EscopoEndereco,
+} from "./endereco-campos";
 
 const DOCUMENT_XML = "word/document.xml";
 
@@ -32,17 +42,30 @@ function bufferParaBase64(buf: Uint8Array): string {
   return btoa(bin);
 }
 
-// ---------- Consolidar runs do Word ----------
-// Word costuma quebrar {{TAG}} entre múltiplos <w:r> por causa de verificação ortográfica.
-// Antes de procurar placeholders precisamos unir runs adjacentes no mesmo parágrafo.
+// ---------- Abertura validada do .docx ----------
+// Valida o formato ANTES de tentar abrir: um .doc legado é um container OLE2
+// que costuma embutir um ZIP de tema, então o pizzip abre sem erro e só depois
+// descobriríamos que não há "word/document.xml".
 
-function consolidarRunsXML(xml: string): string {
-  // Estratégia simples: dentro de cada parágrafo, juntar <w:t> consecutivos que aparecem
-  // entre tags <w:r> com mesmo rPr. Isto é necessário para que regex {{...}} funcione.
-  // Para o caso geral (que é o nosso) basta concatenar todo o texto do parágrafo para
-  // DETECTAR placeholders — não modificamos o XML em si.
-  return xml;
+function abrirDocx(templateBase64: string): PizZip {
+  const formato = detectarFormatoDocumento(templateBase64);
+  if (formato === "doc") throw new Error(MENSAGEM_CONVERSAO_DOC);
+  if (formato !== "docx") throw new Error(MENSAGEM_FORMATO_INVALIDO);
+
+  let zip: PizZip;
+  try {
+    zip = new PizZip(base64ParaBuffer(templateBase64));
+  } catch {
+    throw new Error(MENSAGEM_FORMATO_INVALIDO);
+  }
+  if (!zip.file(DOCUMENT_XML)) throw new Error(MENSAGEM_FORMATO_INVALIDO);
+  return zip;
 }
+
+// ---------- Consolidar runs do Word ----------
+// O Word quebra um mesmo {{TAG}} entre vários <w:r> (verificação ortográfica,
+// revisões). Para DETECTAR placeholders basta concatenar o texto do parágrafo —
+// não reescrevemos o XML nessa etapa.
 
 function textoCompletoDoParagrafo(pXml: string): string {
   const matches = [...pXml.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)];
@@ -51,12 +74,29 @@ function textoCompletoDoParagrafo(pXml: string): string {
 
 // ---------- Detecção de placeholders ----------
 
-export async function extrairPlaceholders(templateBase64: string): Promise<string[]> {
-  const buf = base64ParaBuffer(templateBase64);
-  const zip = new PizZip(buf);
+// Chaves quebradas: `{{CAMPO}`, `{CAMPO}}`, `{CAMPO}`, `{{CAMPO`. Nenhuma delas
+// é preenchida pelo docxtemplater — o campo sairia literal no contrato final,
+// sem nenhum aviso. Procuramos no texto JÁ CONSOLIDADO do parágrafo, depois de
+// remover as chaves bem formadas.
+function chavesMalformadas(textoParagrafo: string): string[] {
+  const resto = textoParagrafo.replace(/\{\{\s*[^{}]+?\s*\}\}/g, "");
+  if (!/[{}]/.test(resto)) return [];
+  return [...resto.matchAll(/\{+[^{}]{0,60}\}*|\{*[^{}]{0,60}\}+/g)]
+    .map((m) => m[0].trim())
+    .filter((t) => /[{}]/.test(t));
+}
+
+export async function extrairPlaceholders(templateBase64: string): Promise<EstruturaModelo> {
+  // .doc legado é convertido aqui, uma única vez. O .docx resultante volta ao
+  // cliente e passa a ser O modelo — a geração final não converte de novo, nem
+  // corre o risco de trabalhar sobre um arquivo diferente do que foi analisado.
+  const template = await normalizarParaDocx(templateBase64);
+
+  const zip = abrirDocx(template);
   const xml = zip.file(DOCUMENT_XML)?.asText() ?? "";
 
   const encontrados = new Set<string>();
+  const malformados: string[] = [];
 
   // 1) Placeholders {{...}} — varrer parágrafo por parágrafo (texto consolidado)
   const paragrafos = [...xml.matchAll(/<w:p[\s>][^]*?<\/w:p>/g)];
@@ -66,6 +106,7 @@ export async function extrairPlaceholders(templateBase64: string): Promise<strin
     for (const t of tags) {
       encontrados.add(t[1].trim());
     }
+    malformados.push(...chavesMalformadas(txt));
   }
 
   // 2) Runs com cor vermelha (FF0000 / C00000 / ED1C24) e texto não vazio
@@ -74,9 +115,7 @@ export async function extrairPlaceholders(templateBase64: string): Promise<strin
   for (const m of xml.matchAll(runRegex)) {
     const r = m[0];
     if (!coresVermelhas.test(r)) continue;
-    const textos = [...r.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)]
-      .map((t) => t[1])
-      .join("");
+    const textos = [...r.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map((t) => t[1]).join("");
     const limpo = textos.trim();
     if (limpo && !encontrados.has(limpo)) {
       // Marca como [VERMELHO] nome para diferenciar
@@ -85,18 +124,89 @@ export async function extrairPlaceholders(templateBase64: string): Promise<strin
   }
 
   // Ordem estável (insertion order garantido em Set)
-  return [...encontrados];
+  const convertidoDeDoc = template !== templateBase64;
+  return {
+    placeholders: [...encontrados],
+    malformados: [...new Set(malformados)],
+    // Só devolve o arquivo quando ele mudou; senão o cliente reusa o que já tem.
+    templateBase64: convertidoDeDoc ? template : "",
+    convertidoDeDoc,
+  };
+}
+
+// Aceita .doc convertendo para .docx quando o ambiente permite; devolve o
+// próprio arquivo quando já é .docx.
+async function normalizarParaDocx(templateBase64: string): Promise<string> {
+  if (detectarFormatoDocumento(templateBase64) !== "doc") return templateBase64;
+
+  const { converterDocParaDocx } = await import("./conversao-doc.server");
+  const convertido = await converterDocParaDocx(templateBase64);
+  if (!convertido) throw new Error(MENSAGEM_CONVERSAO_DOC);
+  if (detectarFormatoDocumento(convertido) !== "docx") throw new Error(MENSAGEM_CONVERSAO_DOC);
+  return convertido;
 }
 
 // ---------- IA: extração estruturada ----------
+
+export type Confianca = "alta" | "media" | "baixa";
 
 export type Conflito = {
   campo: string;
   valores: { valor: string; fonte: string }[];
 };
 
+// Schema da resposta, em modo estrito. Duas restrições do strict mode moldam o
+// formato: nada de dicionário com chaves livres (por isso `campos` é lista, e
+// não um objeto indexado pelo nome do campo) e TODA propriedade precisa estar em
+// `required` com `additionalProperties: false`.
+const ESQUEMA_EXTRACAO = {
+  nome: "extracao_contrato",
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["campos", "faltantes", "conflitos", "observacoes"],
+    properties: {
+      campos: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["nome", "valor", "fonte", "confianca"],
+          properties: {
+            nome: { type: "string", description: "Nome do campo exatamente como listado" },
+            valor: { type: "string", description: "Valor extraído; vazio se não encontrado" },
+            fonte: { type: "string", description: "Nome do arquivo de onde saiu o valor" },
+            confianca: { type: "string", enum: ["alta", "media", "baixa"] },
+          },
+        },
+      },
+      faltantes: { type: "array", items: { type: "string" } },
+      conflitos: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["campo", "valores"],
+          properties: {
+            campo: { type: "string" },
+            valores: {
+              type: "array",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["valor", "fonte"],
+                properties: { valor: { type: "string" }, fonte: { type: "string" } },
+              },
+            },
+          },
+        },
+      },
+      observacoes: { type: "string" },
+    },
+  },
+} as const;
+
 export async function extrairValoresViaIA(
-  apiKey: string,
   placeholders: string[],
   arquivos: { nome: string; mime: string; base64: string }[],
 ): Promise<{
@@ -104,9 +214,23 @@ export async function extrairValoresViaIA(
   faltantes: string[];
   conflitos: Conflito[];
   observacoes: string;
+  tokens: number;
 }> {
-
   const placeholdersLimpos = placeholders.map((p) => p.replace(/^__VERMELHO__::/, ""));
+
+  // Quando o modelo tem um marcador de endereço composto, pedimos também as
+  // peças separadas — é o que permite conferir e validar rua, número, bairro,
+  // cidade, UF e CEP um a um na revisão. A linha final é remontada na geração.
+  const escoposEndereco: EscopoEndereco[] = [];
+  for (const ph of placeholdersLimpos) {
+    const tipo = detectarTipo(ph);
+    if (tipo === "enderecoSocio" && !escoposEndereco.includes("socio")) {
+      escoposEndereco.push("socio");
+    }
+    if (tipo === "enderecoEmpresa" && !escoposEndereco.includes("empresa")) {
+      escoposEndereco.push("empresa");
+    }
+  }
 
   const promptSistema = `Você é um assistente especialista em direito societário brasileiro da Gaulke Contábil.
 Sua tarefa é extrair dados de empresa e sócios a partir de documentos (viabilidade, DBE, ficha cadastral, RG, CNH, comprovante de residência, contratos anteriores) para preencher um contrato social.
@@ -129,18 +253,14 @@ REGRAS RIGOROSAS:
    - Retorne em MINÚSCULAS (o sistema aplica Title Case depois; apenas iniciais de cada atividade ficam maiúsculas).
    - Se o REGIN não estiver entre os arquivos anexados, deixe o campo vazio e adicione em "faltantes" + "observacoes" avisando que o REGIN é necessário. NUNCA invente objeto social a partir de outros documentos.
 7. Para objeto social: retorne em minúsculas (o sistema aplica Title Case com preposições corretas depois).
-8. ENDEREÇOS — siga exatamente a regra conforme o tipo do campo:
-   a) Endereço do SÓCIO / pessoa física (campos contendo "endereço", "endereco" ou variações que não sejam da empresa):
-      Formato: "rua <Nome da Rua> nº <número>, Bairro <Nome do Bairro>, CEP <00.000-000>"
-      - tipo do logradouro em MINÚSCULAS ("rua", "avenida", "travessa", "rodovia", "estrada").
-      - "nº" sempre minúsculo; "Bairro" com B maiúsculo; "CEP" sempre em maiúsculas.
-      - NÃO inclua município nem UF aqui (esses vão em campos separados como {{CIDADE}}).
-      - nomes próprios em Title Case (preposições "de", "do", "da" minúsculas).
-      - CEP formatado como 00.000-000.
-      - se houver complemento, inclua entre número e bairro: "rua X nº 100, sala 2, Bairro Y, CEP ...".
-   b) Endereço da EMPRESA (campos como ENDERECO_EMPRESA, SEDE etc.):
-      Formato: "Rua <Nome>, nº <número>, bairro <Nome>, <Município> - <UF>, CEP <00.000-000>"
-      - mesmas regras de Title Case; "nº", "bairro" minúsculos; "CEP" e UF em maiúsculas.
+8. ENDEREÇOS — NÃO monte a linha do endereço. Preencha os campos de COMPONENTE
+   (nomes começando com __ENDSOCIO_ / __ENDEMPRESA_) listados na mensagem do
+   usuário, cada peça isolada e sem rótulo. O sistema monta a linha final.
+   - Se o modelo também tiver um campo de endereço "inteiro", deixe-o VAZIO:
+     preenchê-lo duplicaria o texto no contrato.
+   - Endereço do SÓCIO vem do comprovante de residência / CNH / RG.
+   - Endereço da EMPRESA vem do REGIN / DBE / ficha cadastral — é a sede, e
+     costuma ser diferente do endereço do sócio.
 9. Profissão padrão: "empresário(a)" se não houver outra informação clara.
 10. Nacionalidade padrão: "brasileiro(a)" se não houver outra informação clara.
 11. PLACEHOLDERS-RÓTULO (CRÍTICO — evita duplicação de texto no contrato):
@@ -168,7 +288,6 @@ REGRAS RIGOROSAS:
     duplicado no contrato final.
 12. Resposta DEVE ser JSON válido, sem cercas markdown, sem comentários.`;
 
-
   const promptUsuario = `Extraia os seguintes campos do contrato (nomes como aparecem no modelo):
 
 ${placeholdersLimpos.map((p, i) => `${i + 1}. ${p}`).join("\n")}
@@ -177,22 +296,27 @@ Além dos campos acima, SEMPRE retorne também o campo especial
 "__META_TIPO_DOC_IDENTIDADE__" com valor "CNH" se o documento de identificação
 do(s) sócio(s) anexado for uma Carteira Nacional de Habilitação, ou "RG" se
 for uma Carteira de Identidade / RG. Se não conseguir determinar, retorne "".
+${escoposEndereco.map((e) => `\n${instrucoesPrompt(e)}`).join("\n")}
 
 Retorne EXATAMENTE este JSON:
 {
-  "valores": {
-    "<nome do campo>": { "valor": "<string>", "fonte": "<nome do arquivo>", "confianca": "alta|media|baixa" }
-  },
+  "campos": [
+    { "nome": "<nome do campo>", "valor": "<string>", "fonte": "<nome do arquivo>", "confianca": "alta|media|baixa" }
+  ],
   "faltantes": ["<nome do campo>"],
   "conflitos": [
     { "campo": "<nome>", "valores": [{ "valor": "...", "fonte": "..." }] }
   ],
   "observacoes": "<texto curto explicando ambiguidades, ilegibilidade ou observações relevantes>"
-}`;
+}
 
-  // Montar mensagem multimodal no formato OpenAI-compatible.
-  // Não usamos AI SDK aqui porque o adapter openai-compatible não suporta
-  // file parts com application/pdf — POSTamos direto no gateway.
+Inclua em "campos" TODOS os campos listados acima, mesmo os que não encontrou
+(nesses, "valor" vazio e "confianca": "baixa").`;
+
+  // Conteúdo multimodal no formato do /v1/chat/completions da OpenAI: imagens
+  // como image_url e PDFs como file part. Em PDF a API extrai o texto E renderiza
+  // as páginas como imagem, então documento escaneado é lido pela via de visão —
+  // não precisamos de OCR separado.
   const content: Array<Record<string, unknown>> = [{ type: "text", text: promptUsuario }];
   for (const arq of arquivos) {
     if (arq.mime.startsWith("image/")) {
@@ -212,62 +336,48 @@ Retorne EXATAMENTE este JSON:
     }
   }
 
-  const resposta = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Lovable-API-Key": apiKey,
-      "X-Lovable-AIG-SDK": "vercel-ai-sdk",
-    },
-    body: JSON.stringify({
-      model: "google/gemini-3-flash-preview",
-      temperature: 0.1,
-      messages: [
-        { role: "system", content: promptSistema },
-        { role: "user", content },
-      ],
-    }),
-  });
+  const { completarComEsquema } = await import("./openai.server");
+  const { texto, tokens, comEsquema } = await completarComEsquema(
+    promptSistema,
+    content,
+    ESQUEMA_EXTRACAO,
+  );
+  console.info(
+    `Extração concluída: ${tokens} tokens${comEsquema ? "" : " (sem esquema estrito)"}.`,
+  );
 
-  if (!resposta.ok) {
-    const detalhe = await resposta.text();
-    if (resposta.status === 429) {
-      throw new Error("Limite de uso da IA atingido. Aguarde alguns instantes e tente novamente.");
-    }
-    if (resposta.status === 402) {
-      throw new Error(
-        "Créditos da IA esgotados. Adicione créditos em Configurações > Planos & créditos.",
-      );
-    }
-    throw new Error(`Falha na chamada à IA (${resposta.status}): ${detalhe.slice(0, 500)}`);
-  }
-
-  const json = (await resposta.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-  const texto = (json.choices?.[0]?.message?.content ?? "").trim();
-
-  // remover cercas markdown se houverem
-  const limpo = texto.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "");
+  type CampoExtraido = { nome: string; valor: string; fonte: string; confianca: Confianca };
   let parsed: {
-    valores?: Record<string, { valor: string; fonte: string; confianca: "alta" | "media" | "baixa" }>;
+    campos?: CampoExtraido[];
     faltantes?: string[];
     conflitos?: Conflito[];
     observacoes?: string;
   };
   try {
-    parsed = JSON.parse(limpo);
+    // Com structured outputs o texto já vem como JSON puro. A remoção de cercas
+    // markdown continua aqui para o caminho de fallback sem esquema estrito.
+    parsed = JSON.parse(texto.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, ""));
   } catch (e) {
     throw new Error(
       `A IA retornou um JSON inválido. Tente novamente. Detalhe: ${(e as Error).message}`,
     );
   }
 
+  // Lista → dicionário indexado pelo nome do campo, que é o formato que o
+  // restante do sistema consome. A lista existe só porque o modo estrito do
+  // structured outputs não aceita objeto com chaves arbitrárias.
+  const valoresDaIA: Record<string, { valor: string; fonte: string; confianca: Confianca }> = {};
+  for (const campo of parsed.campos ?? []) {
+    if (!campo?.nome) continue;
+    valoresDaIA[campo.nome] = {
+      valor: campo.valor ?? "",
+      fonte: campo.fonte || "—",
+      confianca: campo.confianca ?? "baixa",
+    };
+  }
+
   // Normalizar — garantir que TODOS os placeholders apareçam nos valores
-  const valoresFinais: Record<
-    string,
-    { valor: string; fonte: string; confianca: "alta" | "media" | "baixa" }
-  > = {};
+  const valoresFinais: Record<string, { valor: string; fonte: string; confianca: Confianca }> = {};
   for (const ph of placeholdersLimpos) {
     // Campos de data atual são sempre preenchidos com a data de hoje (Brasil),
     // ignorando o que a IA tenha encontrado nos documentos.
@@ -277,8 +387,10 @@ Retorne EXATAMENTE este JSON:
       .toLowerCase()
       .replace(/[_\s]+/g, " ")
       .trim();
-    if (/\bdata\b.*\b(atual|hoje|de hoje|do dia|corrente|emiss[aã]o|gera[cç][aã]o)\b/.test(phNorm) ||
-        /\b(data atual|data de hoje|data do dia|data corrente)\b/.test(phNorm)) {
+    if (
+      /\bdata\b.*\b(atual|hoje|de hoje|do dia|corrente|emiss[aã]o|gera[cç][aã]o)\b/.test(phNorm) ||
+      /\b(data atual|data de hoje|data do dia|data corrente)\b/.test(phNorm)
+    ) {
       const hoje = new Date().toLocaleDateString("pt-BR", {
         timeZone: "America/Sao_Paulo",
         year: "numeric",
@@ -294,16 +406,36 @@ Retorne EXATAMENTE este JSON:
       };
       continue;
     }
-    const original = parsed.valores?.[ph];
-    valoresFinais[ph] = original ?? { valor: "", fonte: "—", confianca: "baixa" };
+    valoresFinais[ph] = valoresDaIA[ph] ?? { valor: "", fonte: "—", confianca: "baixa" };
   }
 
-  // Propagar meta-campos retornados pela IA (ex.: __META_TIPO_DOC_IDENTIDADE__)
-  if (parsed.valores) {
-    for (const [k, v] of Object.entries(parsed.valores)) {
-      if (k.startsWith("__META_") && !valoresFinais[k]) {
-        valoresFinais[k] = v;
-      }
+  // Propagar campos sintéticos: meta (__META_*) e componentes de endereço
+  // (__ENDSOCIO_*, __ENDEMPRESA_*). Não são placeholders do Word, então não
+  // entram no laço acima, mas a tela de revisão precisa deles.
+  for (const [k, v] of Object.entries(valoresDaIA)) {
+    if ((k.startsWith("__META_") || ehChaveDeEndereco(k)) && !valoresFinais[k]) {
+      valoresFinais[k] = v;
+    }
+  }
+
+  // Se a IA ignorou os componentes e devolveu só a linha inteira, decompomos
+  // aqui — assim a tela sempre tem as peças para conferir.
+  for (const escopo of escoposEndereco) {
+    const chaves = chavesDoEscopo(escopo);
+    if (chaves.some((c) => valoresFinais[c]?.valor?.trim())) continue;
+
+    const tipoAlvo = escopo === "socio" ? "enderecoSocio" : "enderecoEmpresa";
+    const composto = placeholdersLimpos.find((p) => detectarTipo(p) === tipoAlvo);
+    const linha = composto ? (valoresFinais[composto]?.valor ?? "") : "";
+    if (!linha.trim()) continue;
+
+    const { decomporEndereco } = await import("./formatters");
+    const { gravarComponentes } = await import("./endereco-campos");
+    const pecas: Record<string, string> = {};
+    gravarComponentes(pecas, escopo, decomporEndereco(linha));
+    const fonte = composto ? (valoresFinais[composto]?.fonte ?? "—") : "—";
+    for (const [k, valor] of Object.entries(pecas)) {
+      valoresFinais[k] = { valor, fonte, confianca: "media" };
     }
   }
 
@@ -312,6 +444,7 @@ Retorne EXATAMENTE este JSON:
     faltantes: parsed.faltantes ?? placeholdersLimpos.filter((p) => !valoresFinais[p]?.valor),
     conflitos: parsed.conflitos ?? [],
     observacoes: parsed.observacoes ?? "",
+    tokens,
   };
 }
 
@@ -321,8 +454,7 @@ export async function gerarDocxPreenchido(
   templateBase64: string,
   valores: Record<string, string>,
 ): Promise<string> {
-  const buf = base64ParaBuffer(templateBase64);
-  const zip = new PizZip(buf);
+  const zip = abrirDocx(templateBase64);
 
   // 0) Aplicar regras de caixa alta para razão social e nomes de sócios
   const valoresTransformados: Record<string, string> = {};
@@ -377,8 +509,9 @@ export async function gerarDocxPreenchido(
   );
 
   // Forçar negrito nos runs que contêm {{TAG}} de razão social / sócio
-  const tagsNegrito = Object.keys(valoresTransformados)
-    .filter((k) => !k.startsWith("__VERMELHO__::") && ehCampoEmpresaOuSocio(k));
+  const tagsNegrito = Object.keys(valoresTransformados).filter(
+    (k) => !k.startsWith("__VERMELHO__::") && ehCampoEmpresaOuSocio(k),
+  );
   xml = forcarNegritoEmTags(xml, tagsNegrito);
 
   // Substituir conteúdo de runs vermelhos cujo texto-normalizado seja uma chave conhecida
@@ -447,14 +580,10 @@ function adicionarNegritoEmRun(run: string): string {
   const rPrMatch = run.match(/<w:rPr>([\s\S]*?)<\/w:rPr>/);
   if (rPrMatch) {
     if (/<w:b\s*\/?>/.test(rPrMatch[1])) return run;
-    return run.replace(
-      rPrMatch[0],
-      `<w:rPr><w:b/><w:bCs/>${rPrMatch[1]}</w:rPr>`,
-    );
+    return run.replace(rPrMatch[0], `<w:rPr><w:b/><w:bCs/>${rPrMatch[1]}</w:rPr>`);
   }
   return run.replace(/(<w:r\b[^>]*>)/, `$1<w:rPr><w:b/><w:bCs/></w:rPr>`);
 }
-
 
 // Aplica regex sobre o TEXTO CONSOLIDADO de cada parágrafo, removendo/substituindo
 // caracteres mesmo quando o trecho está dividido entre vários <w:t>.
@@ -508,8 +637,6 @@ function limparTextoConsolidado(xml: string, padrao: RegExp, substituto: string)
   });
 }
 
-
-
 function escapeXml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -519,16 +646,16 @@ function escapeXml(s: string): string {
     .replace(/'/g, "&apos;");
 }
 
-function substituirRunsVermelhos(
-  xml: string,
-  valores: Record<string, string>,
-): string {
+function substituirRunsVermelhos(xml: string, valores: Record<string, string>): string {
   const coresVermelhas = /(FF0000|C00000|ED1C24|E81123|DC143C)/i;
   return xml.replace(/<w:r[\s>][^]*?<\/w:r>/g, (run) => {
     if (!coresVermelhas.test(run)) return run;
     const textos = [...run.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)];
     if (textos.length === 0) return run;
-    const textoTotal = textos.map((t) => t[1]).join("").trim();
+    const textoTotal = textos
+      .map((t) => t[1])
+      .join("")
+      .trim();
     if (!textoTotal) return run;
     const chave = `__VERMELHO__::${textoTotal}`;
     const v = valores[chave] ?? valores[textoTotal];
@@ -547,10 +674,7 @@ function substituirRunsVermelhos(
   });
 }
 
-function substituirPlaceholdersManual(
-  xml: string,
-  dados: Record<string, string>,
-): string {
+function substituirPlaceholdersManual(xml: string, dados: Record<string, string>): string {
   // Substitui {{NOME}} no texto consolidado de cada <w:t>. Não é perfeito quando o tag
   // se quebra em runs, mas serve como fallback quando docxtemplater falhar.
   for (const [k, v] of Object.entries(dados)) {
