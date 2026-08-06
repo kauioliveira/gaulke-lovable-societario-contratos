@@ -1,0 +1,1 @@
+# gaulke-lovable-societario-contratos
