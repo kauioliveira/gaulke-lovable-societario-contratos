@@ -1,0 +1,35 @@
+# Segredos — a chave da OpenAI entra em tempo de execução, pelo env_file do
+# docker compose. Copiar o .env para a imagem grava a chave numa camada, de onde
+# ela sai com um `docker save` ou um `docker history`.
+.env
+.env.*
+!.env.example
+.dev.vars
+
+# Documentos reais usados em teste (CNH, comprovante de residência, CPF).
+# Não podem viajar dentro da imagem.
+exemplo-claude/
+
+# Reinstalado/reconstruído dentro da imagem
+node_modules
+.output
+dist
+dist-ssr
+dist-docker
+docker-images
+.nitro
+.tanstack
+.wrangler
+
+# Histórico e ferramentas — irrelevantes para o build e pesados
+.git
+.gitignore
+.claude
+.vscode
+.idea
+scripts/
+*.log
+
+# Documentação
+*.md
+!README.md

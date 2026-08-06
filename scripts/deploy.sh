@@ -11,7 +11,11 @@ set -e
 APP_NAME="gaulke-lovable-contrato-social"
 CONTAINER_NAME="gaulke-sc-contrato-lovable"
 
-INTERNAL_PORT="80"
+# ATENÇÃO: 3000, não 80. Este projeto não é site estático atrás de nginx — é um
+# servidor Node com SSR (TanStack Start + Nitro) que escuta na 3000, definido no
+# Dockerfile (ENV PORT) e no docker-compose.yml. Com 80 aqui, o docker publica
+# 2004 -> 80 e ninguém atende: a página abre em branco.
+INTERNAL_PORT="3000"
 EXTERNAL_PORT="2004"
 
 IMAGE_NAME="${APP_NAME}"
